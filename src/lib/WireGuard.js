@@ -16,6 +16,7 @@ const {
   WG_CONFIG_PORT,
   WG_MTU,
   WG_DEFAULT_DNS,
+  WG_DEFAULT_SUBNET,
   WG_DEFAULT_ADDRESS,
   WG_PERSISTENT_KEEPALIVE,
   WG_ALLOWED_IPS,
@@ -68,7 +69,7 @@ module.exports = class WireGuard {
       const config = await this.__buildConfig();
 
       await this.__saveConfig(config);
-      await Util.exec('wg-quick down wg0').catch(() => {});
+      await Util.exec('wg-quick down wg0').catch(() => { });
       await Util.exec('wg-quick up wg0').catch((err) => {
         if (err && err.message && err.message.includes('Cannot find device "wg0"')) {
           throw new Error('WireGuard exited with the error: Cannot find device "wg0"\nThis usually means that your host\'s kernel does not support WireGuard!');
@@ -76,10 +77,6 @@ module.exports = class WireGuard {
 
         throw err;
       });
-      // await Util.exec(`iptables -t nat -A POSTROUTING -s ${WG_DEFAULT_ADDRESS.replace('x', '0')}/24 -o ' + WG_DEVICE + ' -j MASQUERADE`);
-      // await Util.exec('iptables -A INPUT -p udp -m udp --dport 51820 -j ACCEPT');
-      // await Util.exec('iptables -A FORWARD -i wg0 -j ACCEPT');
-      // await Util.exec('iptables -A FORWARD -o wg0 -j ACCEPT');
       await this.__syncConfig();
     }
 
@@ -100,7 +97,7 @@ module.exports = class WireGuard {
 # Server
 [Interface]
 PrivateKey = ${config.server.privateKey}
-Address = ${config.server.address}/24
+Address = ${config.server.address}/${WG_DEFAULT_SUBNET}
 ListenPort = ${WG_PORT}
 PreUp = ${WG_PRE_UP}
 PostUp = ${WG_POST_UP}
@@ -117,7 +114,7 @@ PostDown = ${WG_POST_DOWN}
 [Peer]
 PublicKey = ${client.publicKey}
 ${client.preSharedKey ? `PresharedKey = ${client.preSharedKey}\n` : ''
-}AllowedIPs = ${client.address}/32`;
+        }AllowedIPs = ${client.address}/32`;
     }
 
     debug('Config saving...');
@@ -198,6 +195,20 @@ ${client.preSharedKey ? `PresharedKey = ${client.preSharedKey}\n` : ''
     return client;
   }
 
+  async getClientByName({ name }) {
+    if (!name) {
+      throw new ServerError('Missing: Name', 400);
+    }
+    const config = await this.getConfig();
+    const client = Object.values(config.clients).find(
+      (client) => client.name === name
+    );
+    if (!client) {
+      throw new ServerError(`Client Not Found: ${name}`, 404);
+    }
+    return client;
+  }
+
   async getClientConfiguration({ clientId }) {
     const config = await this.getConfig();
     const client = await this.getClient({ clientId });
@@ -205,14 +216,14 @@ ${client.preSharedKey ? `PresharedKey = ${client.preSharedKey}\n` : ''
     return `
 [Interface]
 PrivateKey = ${client.privateKey ? `${client.privateKey}` : 'REPLACE_ME'}
-Address = ${client.address}/24
+Address = ${client.address}/${WG_DEFAULT_SUBNET}
 ${WG_DEFAULT_DNS ? `DNS = ${WG_DEFAULT_DNS}\n` : ''}\
 ${WG_MTU ? `MTU = ${WG_MTU}\n` : ''}\
 
 [Peer]
 PublicKey = ${config.server.publicKey}
 ${client.preSharedKey ? `PresharedKey = ${client.preSharedKey}\n` : ''
-}AllowedIPs = ${WG_ALLOWED_IPS}
+      }AllowedIPs = ${WG_ALLOWED_IPS}
 PersistentKeepalive = ${WG_PERSISTENT_KEEPALIVE}
 Endpoint = ${WG_HOST}:${WG_CONFIG_PORT}`;
   }
@@ -277,6 +288,71 @@ Endpoint = ${WG_HOST}:${WG_CONFIG_PORT}`;
 
     return client;
   }
+
+  async createClientWithAddress({ name, address, uniqueName }) {
+    if (!name) {
+      throw new Error('Missing: Name');
+    }
+
+    if (!address) {
+      throw new Error('Missing: Address');
+    }
+
+    if (!Util.isValidIPv4(address)) {
+      throw new Error(`Invalid IPv4 address: ${address}`);
+    }
+
+    const config = await this.getConfig();
+
+    // Optional: Prüfen, ob der Name bereits existiert
+    if (uniqueName === true) {
+      const nameInUse = Object.values(config.clients).some(
+        (client) => client.name === name
+      );
+
+      if (nameInUse) {
+        throw new Error(`Name already in use: ${name}`);
+      }
+    }
+
+    // Prüfen, ob die Adresse bereits vergeben ist
+    const addressInUse = Object.values(config.clients).some(
+      (client) => client.address === address
+    );
+
+    if (addressInUse) {
+      throw new Error(`Address already in use: ${address}`);
+    }
+
+    const privateKey = await Util.exec('wg genkey');
+    const publicKey = await Util.exec(`echo ${privateKey} | wg pubkey`, {
+      log: 'echo ***hidden*** | wg pubkey',
+    });
+    const preSharedKey = await Util.exec('wg genpsk');
+
+    const id = crypto.randomUUID();
+    const client = {
+      id,
+      name,
+      address,
+      privateKey,
+      publicKey,
+      preSharedKey,
+
+      createdAt: new Date(),
+      updatedAt: new Date(),
+
+      enabled: true,
+    };
+
+    config.clients[id] = client;
+
+    await this.saveConfig();
+
+    return client;
+  }
+
+
 
   async deleteClient({ clientId }) {
     const config = await this.getConfig();
@@ -350,7 +426,7 @@ Endpoint = ${WG_HOST}:${WG_CONFIG_PORT}`;
 
   // Shutdown wireguard
   async Shutdown() {
-    await Util.exec('wg-quick down wg0').catch(() => {});
+    await Util.exec('wg-quick down wg0').catch(() => { });
   }
 
 };

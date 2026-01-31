@@ -172,6 +172,16 @@ module.exports = class Server {
       .get('/api/wireguard/client', defineEventHandler(() => {
         return WireGuard.getClients();
       }))
+      .get('/api/wireguard/client/:clientId', defineEventHandler(async (event) => {
+        const clientId = getRouterParam(event, 'clientId');
+        const client = await WireGuard.getClient({ clientId });
+        return client;
+      }))
+      .get('/api/wireguard/client/by-name/:name', defineEventHandler(async (event) => {
+        const name = getRouterParam(event, 'name');
+        const client = await WireGuard.getClientByName({ name });
+        return client;
+      }))
       .get('/api/wireguard/client/:clientId/qrcode.svg', defineEventHandler(async (event) => {
         const clientId = getRouterParam(event, 'clientId');
         const svg = await WireGuard.getClientQRCodeSVG({ clientId });
@@ -192,9 +202,24 @@ module.exports = class Server {
         return config;
       }))
       .post('/api/wireguard/client', defineEventHandler(async (event) => {
-        const { name } = await readBody(event);
-        await WireGuard.createClient({ name });
-        return { success: true };
+        const { name, address, uniqueName } = await readBody(event);
+        let client;
+        if (name && !address && uniqueName == null) {
+          client = await WireGuard.createClient({ name });
+        }
+        else if (name && (address || uniqueName != null)) {
+          client = await WireGuard.createClientWithAddress({
+            name,
+            address,
+            uniqueName,
+          });
+        } else {
+          throw new Error('Invalid request body');
+        }
+        return {
+          success: true,
+          id: client.id,
+        };
       }))
       .delete('/api/wireguard/client/:clientId', defineEventHandler(async (event) => {
         const clientId = getRouterParam(event, 'clientId');
@@ -287,7 +312,7 @@ module.exports = class Server {
           getMeta: async (id) => {
             const filePath = safePathJoin(publicDir, id);
 
-            const stats = await stat(filePath).catch(() => {});
+            const stats = await stat(filePath).catch(() => { });
             if (!stats || !stats.isFile()) {
               return;
             }
